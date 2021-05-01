@@ -215,7 +215,7 @@ function serverPlugin(opts: InternalOptions): rollup.Plugin {
   // and finally, once they are all done, inline the asset manifest into the
   // final server bundle.
   channel.getBundleWriter = () => {
-    const bundles: unknown[] = [];
+    const bundles: unknown[] = [PENDING_MARKER];
     let outputIds: string[] | undefined;
     let writtenBundles: number;
     bundlesPerWriter.push(bundles);
@@ -446,8 +446,11 @@ function browserPlugin(opts: InternalOptions): rollup.Plugin {
     output: "hydrate",
   };
   let compiler: typeof Compiler;
-  let writer: undefined | ReturnType<Channel["getBundleWriter"]>;
+  const writer:
+    | undefined
+    | ReturnType<Channel["getBundleWriter"]> = channel?.getBundleWriter();
   let currentServerEntries: { [x: string]: string };
+  let serverEntriesFile: string;
 
   return {
     ...COMMON_PLUGIN,
@@ -456,7 +459,33 @@ function browserPlugin(opts: InternalOptions): rollup.Plugin {
       // This communicates back with the server compiler (if one exists)
       // to tell it that compiling assets for this browser compiler has started.
       if (channel.isActive) {
-        (writer ??= channel.getBundleWriter()).init(inputOptions);
+        writer?.init(inputOptions);
+
+        // Here we load the temp file (created by the server compiler) with the
+        // list of Marko files that need to be bundled.
+        serverEntriesFile = await getServerEntriesFile(channel);
+
+        if (!isEmpty(inputOptions.input)) {
+          throw new Error(
+            `Setting the "input" option when using both marko.browser() and marko.server() plugins is not supported.`
+          );
+        }
+
+        try {
+          inputOptions.input = currentServerEntries = JSON.parse(
+            await fs.promises.readFile(serverEntriesFile, "utf-8")
+          );
+        } catch (err) {
+          throw new Error(
+            `The "server" rollup config must be ran before the "browser" rollup config.`
+          );
+        }
+
+        if (isEmpty(inputOptions.input)) {
+          throw new Error(
+            "No Marko files were found when compiling the server."
+          );
+        }
       }
 
       hideWarning(inputOptions, (warning) =>
@@ -469,34 +498,9 @@ function browserPlugin(opts: InternalOptions): rollup.Plugin {
 
       return COMMON_PLUGIN.options!.call(this, inputOptions);
     },
-    async buildStart(inputOptions) {
+    async buildStart() {
       compiler ??= await opts.compiler;
-      if (channel.isActive) {
-        // Here we load the temp file (created by the server compiler) with the
-        // list of Marko files that need to be bundled.
-        const serverEntriesFile = await getServerEntriesFile(channel);
-        this.addWatchFile(serverEntriesFile);
-
-        if (!isEmpty(inputOptions.input)) {
-          this.error(
-            `Setting the "input" option when using both marko.browser() and marko.server() plugins is not supported.`
-          );
-        }
-
-        try {
-          inputOptions.input = currentServerEntries = JSON.parse(
-            await fs.promises.readFile(serverEntriesFile, "utf-8")
-          );
-        } catch (err) {
-          this.error(
-            `The "server" rollup config must be ran before the "browser" rollup config.`
-          );
-        }
-
-        if (isEmpty(inputOptions.input)) {
-          this.error("No Marko files were found when compiling the server.");
-        }
-      }
+      if (channel.isActive) this.addWatchFile(serverEntriesFile);
     },
     resolveId(importee, importer, importOpts) {
       // Besides what the common plugin is doing,
